@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: 'Direct download URL for the SM64 US .z64 ROM file (or a .zip containing it)'
+        description: 'Direct download URL for the SM64 US .z64/.n64 ROM file (or a .zip containing it)'
         required: true
         type: string
 
@@ -45,7 +45,7 @@ jobs:
         run: |
           git clone --recursive https://github.com/MegaBitmap/sm64ex-android.git /c/sm64
 
-      - name: Download and verify baserom.us.z64
+      - name: Download, convert (if needed), and verify baserom.us.z64
         env:
           ROM_URL: ${{ inputs.rom_url }}
         run: |
@@ -58,20 +58,48 @@ jobs:
           if [ "$HEADER" = "504b0304" ]; then
             echo "ZIP archive detected, extracting..."
             unzip -q /tmp/rom_download -d /tmp/rom_extract
-            Z64_FILE=$(find /tmp/rom_extract -type f -iname "*.z64" | head -n 1)
-            if [ -z "$Z64_FILE" ]; then
-              echo "Error: No .z64 file found inside the ZIP archive."
+            ROM_FILE=$(find /tmp/rom_extract -type f \( -iname "*.z64" -o -iname "*.n64" -o -iname "*.v64" \) | head -n 1)
+            if [ -z "$ROM_FILE" ]; then
+              echo "Error: No .z64, .n64, or .v64 file found inside the ZIP archive."
               exit 1
             fi
-            mv "$Z64_FILE" /c/sm64/app/jni/src/baserom.us.z64
           else
-            mv /tmp/rom_download /c/sm64/app/jni/src/baserom.us.z64
+            ROM_FILE="/tmp/rom_download"
           fi
 
-          # Verify the resulting file is a valid big-endian .z64 ROM (magic bytes: 80 37 12 40)
-          ROM_MAGIC=$(od -An -tx1 -N4 /c/sm64/app/jni/src/baserom.us.z64 | tr -d ' \n')
-          if [ "$ROM_MAGIC" != "80371240" ]; then
-            echo "Error: Resulting file is not a valid .z64 ROM (header: $ROM_MAGIC)."
+          # Detect ROM endianness via magic bytes and convert to big-endian .z64 if necessary
+          ROM_MAGIC=$(od -An -tx1 -N4 "$ROM_FILE" | tr -d ' \n')
+          TARGET_ROM="/c/sm64/app/jni/src/baserom.us.z64"
+
+          case "$ROM_MAGIC" in
+            80371240)
+              echo "Native big-endian .z64 ROM detected. No conversion needed."
+              mv "$ROM_FILE" "$TARGET_ROM"
+              ;;
+            40123780)
+              echo "Little-endian .n64 ROM detected. Converting to .z64..."
+              python3 -c '
+          import sys
+          data = open(sys.argv[1], "rb").read()
+          out = bytearray(len(data))
+          out[0::4], out[1::4], out[2::4], out[3::4] = data[3::4], data[2::4], data[1::4], data[0::4]
+          open(sys.argv[2], "wb").write(out)
+          ' "$ROM_FILE" "$TARGET_ROM"
+              ;;
+            37804012)
+              echo "Byte-swapped .v64/.n64 ROM detected. Converting to .z64..."
+              dd if="$ROM_FILE" of="$TARGET_ROM" conv=swab status=none
+              ;;
+            *)
+              echo "Error: Unrecognized ROM header ($ROM_MAGIC). Expected a valid SM64 US .z64 or .n64 ROM."
+              exit 1
+              ;;
+          esac
+
+          # Final verification that output is valid big-endian .z64 (80 37 12 40)
+          FINAL_MAGIC=$(od -An -tx1 -N4 "$TARGET_ROM" | tr -d ' \n')
+          if [ "$FINAL_MAGIC" != "80371240" ]; then
+            echo "Error: ROM conversion failed (header: $FINAL_MAGIC)."
             exit 1
           fi
 
