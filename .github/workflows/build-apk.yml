@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: 'Direct download URL for the SM64 US .z64 ROM file'
+        description: 'Direct download URL for the SM64 US .z64 ROM file (or a .zip containing it)'
         required: true
         type: string
 
@@ -16,23 +16,24 @@ jobs:
         shell: msys2 {0}
 
     steps:
-      - name: Enable Windows Long Paths
-        shell: pwsh
-        run: |
-          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
-            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
-
       - name: Set up MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
+          path-type: minimal
           install: >-
             git
             curl
+            unzip
             make
             python3
+            diffutils
+            util-linux
             mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-glew
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -40,28 +41,53 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Clone sm64ex-android into short path (C:\sm64)
+      - name: Clone sm64ex-android repository
         run: |
           git clone --recursive https://github.com/MegaBitmap/sm64ex-android.git /c/sm64
 
-      - name: Download baserom.us.z64
+      - name: Download and verify baserom.us.z64
         env:
           ROM_URL: ${{ inputs.rom_url }}
         run: |
-          mkdir -p /c/sm64/app/jni/src
-          curl -fSL "$ROM_URL" -o /c/sm64/app/jni/src/baserom.us.z64
-          test -s /c/sm64/app/jni/src/baserom.us.z64
+          set -e
+          mkdir -p /c/sm64/app/jni/src /tmp/rom_extract
+          curl -fSL "$ROM_URL" -o /tmp/rom_download
+
+          # Check if the downloaded file is a ZIP archive (magic bytes: 50 4B 03 04)
+          HEADER=$(od -An -tx1 -N4 /tmp/rom_download | tr -d ' \n')
+          if [ "$HEADER" = "504b0304" ]; then
+            echo "ZIP archive detected, extracting..."
+            unzip -q /tmp/rom_download -d /tmp/rom_extract
+            Z64_FILE=$(find /tmp/rom_extract -type f -iname "*.z64" | head -n 1)
+            if [ -z "$Z64_FILE" ]; then
+              echo "Error: No .z64 file found inside the ZIP archive."
+              exit 1
+            fi
+            mv "$Z64_FILE" /c/sm64/app/jni/src/baserom.us.z64
+          else
+            mv /tmp/rom_download /c/sm64/app/jni/src/baserom.us.z64
+          fi
+
+          # Verify the resulting file is a valid big-endian .z64 ROM (magic bytes: 80 37 12 40)
+          ROM_MAGIC=$(od -An -tx1 -N4 /c/sm64/app/jni/src/baserom.us.z64 | tr -d ' \n')
+          if [ "$ROM_MAGIC" != "80371240" ]; then
+            echo "Error: Resulting file is not a valid .z64 ROM (header: $ROM_MAGIC)."
+            exit 1
+          fi
 
       - name: Run Setup-MINGW64.sh (install dependencies & extract assets)
         working-directory: C:\sm64
         run: |
+          set -e
           sed -i 's/pacman -S /pacman -S --noconfirm --needed /g' Setup-MINGW64.sh
-          bash Setup-MINGW64.sh
+          bash -e Setup-MINGW64.sh
+          test -d /c/sm64/app/jni/src/build/us_pc
 
       - name: Configure Android SDK and build APK
         shell: pwsh
         working-directory: C:\sm64
         run: |
+          $env:PATH = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;$env:PATH"
           $sdkPath = $env:ANDROID_HOME -replace '\\', '/'
           "sdk.dir=$sdkPath" | Out-File -FilePath local.properties -Encoding ascii
           .\gradlew.bat assembleDebug --no-daemon --stacktrace
