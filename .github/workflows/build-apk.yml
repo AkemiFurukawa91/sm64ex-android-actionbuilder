@@ -1,0 +1,74 @@
+name: Build sm64ex-android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'Direct download URL for the SM64 US .z64 ROM file'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            curl
+            make
+            python3
+            mingw-w64-x86_64-gcc
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Clone sm64ex-android repository
+        run: |
+          git clone --recursive https://github.com/MegaBitmap/sm64ex-android.git
+
+      - name: Download baserom.us.z64
+        env:
+          ROM_URL: ${{ inputs.rom_url }}
+        run: |
+          mkdir -p sm64ex-android/app/jni/src
+          curl -fSL "$ROM_URL" -o sm64ex-android/app/jni/src/baserom.us.z64
+          test -s sm64ex-android/app/jni/src/baserom.us.z64
+
+      - name: Run Setup-MINGW64.sh (install dependencies & extract assets)
+        working-directory: sm64ex-android
+        run: |
+          # Ensure pacman commands inside Setup-MINGW64.sh do not hang on interactive prompts
+          sed -i 's/pacman -S /pacman -S --noconfirm --needed /g' Setup-MINGW64.sh
+          bash Setup-MINGW64.sh
+
+      - name: Configure Android SDK and build APK
+        shell: pwsh
+        working-directory: sm64ex-android
+        run: |
+          $sdkPath = $env:ANDROID_HOME -replace '\\', '/'
+          "sdk.dir=$sdkPath" | Out-File -FilePath local.properties -Encoding ascii
+          .\gradlew.bat assembleDebug --no-daemon
+
+      - name: Rename output APK
+        shell: pwsh
+        run: |
+          Copy-Item "sm64ex-android\app\build\outputs\apk\debug\app-debug.apk" -Destination "sm64ex-android.apk"
+
+      - name: Upload sm64ex-android.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: sm64ex-android
+          path: sm64ex-android.apk
+          if-no-files-found: error
