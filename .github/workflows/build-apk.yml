@@ -110,6 +110,8 @@ jobs:
           # Remove deprecated 32-bit i686 packages and bypass interactive pacman prompts
           sed -i 's/mingw-w64-i686-[^ ]*//g' Setup-MINGW64.sh
           sed -i 's/pacman -S /pacman -S --noconfirm --needed /g' Setup-MINGW64.sh
+          # Force C11 mode so GCC 16 does not fail on legacy K&R C function declarations
+          sed -i 's/-fno-strict-aliasing/-std=gnu11 -fno-strict-aliasing/g' app/jni/src/Makefile
           bash -e Setup-MINGW64.sh
           test -d /c/sm64/app/jni/src/build/us_pc
 
